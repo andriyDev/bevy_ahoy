@@ -9,7 +9,6 @@ use bevy_ecs::{
     schedule::ScheduleLabel,
     system::lifetimeless::{Read, Write},
 };
-use bevy_math::Affine3A;
 use core::fmt::Debug;
 use core::time::Duration;
 use std::sync::Arc;
@@ -108,7 +107,6 @@ struct Ctx {
     state: Write<CharacterControllerState>,
     derived: Read<CharacterControllerDerivedProps>,
     output: Write<CharacterControllerOutput>,
-    transform: Write<Transform>,
     position: Read<Position>,
     rotation: Read<Rotation>,
     input: Write<AccumulatedInput>,
@@ -138,11 +136,6 @@ impl CtxItem<'_, '_> {
 #[derive(QueryData)]
 #[query_data(mutable, derive(Debug))]
 struct ColliderComponents {
-    lin_vel: Option<Read<LinearVelocity>>,
-    ang_vel: Option<Read<AngularVelocity>>,
-    com: Option<Read<ComputedCenterOfMass>>,
-    pos: Read<Position>,
-    rot: Read<Rotation>,
     friction: Option<Read<Friction>>,
     body: Read<ColliderOf>,
 }
@@ -150,30 +143,43 @@ struct ColliderComponents {
 #[derive(QueryData)]
 #[query_data(mutable, derive(Debug))]
 struct RigidBodyComponents {
+    pos: Read<Position>,
+    rot: Read<Rotation>,
+    com: Option<Read<ComputedCenterOfMass>>,
+    lin_vel: Option<Read<LinearVelocity>>,
+    ang_vel: Option<Read<AngularVelocity>>,
     friction: Option<Read<Friction>>,
 }
 
 fn run_kcc(
-    mut kccs: Query<Ctx>,
     time: Res<Time>,
-    move_and_slide: MoveAndSlide,
+    mut movement_params: ParamSet<(
+        (Query<Ctx>, MoveAndSlide, Query<(&Position, &Rotation)>),
+        Query<&mut Position, With<CharacterController>>,
+    )>,
     // TODO: allow this to be other KCCs
     colliders: Query<ColliderComponents, (Without<CharacterController>, Without<Sensor>)>,
-    rigid_bodies: Query<RigidBodyComponents>,
+    // TODO: allow this to be other KCCs
+    rigid_bodies: Query<RigidBodyComponents, (Without<CharacterController>, Without<Sensor>)>,
     waters: Query<Entity, With<Water>>,
     default_friction: Res<DefaultFriction>,
-    physics_transforms: Query<(&Position, &Rotation)>,
+    mut entity_to_new_position: Local<Vec<(Entity, Vec3)>>,
 ) {
     let mut colliders = colliders.transmute_lens_inner();
     let colliders = colliders.query();
+    let mut rigid_bodies = rigid_bodies.transmute_lens_inner();
+    let rigid_bodies = rigid_bodies.query();
     let mut waters = waters.transmute_lens_inner();
     let waters = waters.query();
+
+    assert!(entity_to_new_position.is_empty());
+
+    let (mut kccs, move_and_slide, physics_transforms) = movement_params.p0();
     for mut ctx in &mut kccs {
         let Some(mut transform) = ctx.collider_global_transform(&physics_transforms) else {
             error!("Cannot update KCC: The collider is in a corrupt state. Skipping.");
             continue;
         };
-        let original_transform = transform;
 
         ctx.output.mantle = None;
         ctx.output.touching_entities.clear();
@@ -183,7 +189,14 @@ fn run_kcc(
         ctx.state.last_step_down.tick(time.delta());
 
         depenetrate_character(&move_and_slide, &mut ctx, &mut transform);
-        update_grounded(&move_and_slide, &colliders, &time, &mut ctx, &mut transform);
+        update_grounded(
+            &move_and_slide,
+            &colliders,
+            &rigid_bodies,
+            &time,
+            &mut ctx,
+            &mut transform,
+        );
 
         handle_crouching(&move_and_slide, &waters, &mut ctx, &mut transform);
 
@@ -226,6 +239,7 @@ fn run_kcc(
                 wish_velocity,
                 &time,
                 &colliders,
+                &rigid_bodies,
                 &move_and_slide,
                 &mut ctx,
                 &mut transform,
@@ -235,6 +249,7 @@ fn run_kcc(
                 &time,
                 &move_and_slide,
                 &colliders,
+                &rigid_bodies,
                 &mut ctx,
                 &mut transform,
             );
@@ -243,6 +258,7 @@ fn run_kcc(
                 wish_velocity,
                 &time,
                 &colliders,
+                &rigid_bodies,
                 &move_and_slide,
                 &mut ctx,
                 &mut transform,
@@ -288,7 +304,14 @@ fn run_kcc(
         }
 
         let was_grounded = ctx.state.grounded.is_some();
-        update_grounded(&move_and_slide, &colliders, &time, &mut ctx, &mut transform);
+        update_grounded(
+            &move_and_slide,
+            &colliders,
+            &rigid_bodies,
+            &time,
+            &mut ctx,
+            &mut transform,
+        );
         if was_grounded {
             handle_climbdown(
                 wish_velocity,
@@ -310,17 +333,15 @@ fn run_kcc(
         }
         // TODO: check_falling();
 
-        let movement = original_transform.compute_affine().inverse() * transform.compute_affine();
-        *ctx.transform = affine_to_transform(ctx.transform.compute_affine() * movement);
+        entity_to_new_position.push((ctx.entity, transform.translation));
     }
-}
 
-fn affine_to_transform(affine: Affine3A) -> Transform {
-    let (scale, rotation, translation) = affine.to_scale_rotation_translation();
-    Transform {
-        translation,
-        rotation,
-        scale,
+    let mut positions = movement_params.p1();
+    for (entity, new_position) in entity_to_new_position.drain(..) {
+        let mut position = positions
+            .get_mut(entity)
+            .expect("entity was matched from previous query");
+        position.0 = new_position;
     }
 }
 
@@ -635,6 +656,7 @@ fn handle_mantle_movement(
     time: &Time,
     move_and_slide: &MoveAndSlide,
     colliders: &Query<ColliderComponents>,
+    rigid_bodies: &Query<RigidBodyComponents>,
     ctx: &mut CtxItem,
     transform: &mut Transform,
 ) {
@@ -669,7 +691,13 @@ fn handle_mantle_movement(
             ledge_position: hit.point1,
             wall_entity: hit.entity,
         });
-        if let Ok(platform) = colliders.get(mantle_output.wall_entity) {
+        if let Ok(platform) = {
+            let platform_rigid_body = colliders
+                .get(mantle_output.wall_entity)
+                .map(|collider| collider.body.body)
+                .unwrap_or(mantle_output.wall_entity);
+            rigid_bodies.get(platform_rigid_body)
+        } {
             calculate_platform_movement(
                 mantle_output.ledge_position,
                 &platform,
@@ -1181,12 +1209,13 @@ fn closest_wall_normal(
 fn update_grounded(
     move_and_slide: &MoveAndSlide,
     colliders: &Query<ColliderComponents>,
+    rigid_bodies: &Query<RigidBodyComponents>,
     time: &Time,
     ctx: &mut CtxItem,
     transform: &mut Transform,
 ) {
     if ctx.water.level > WaterLevel::Feet {
-        set_grounded(None, colliders, time, ctx, transform);
+        set_grounded(None, colliders, rigid_bodies, time, ctx, transform);
         return;
     }
     // TODO: reset surface friction here for some reason? something something water
@@ -1201,7 +1230,7 @@ fn update_grounded(
 
     let is_on_ladder = false;
     if moving_up_rapidly || (moving_up && is_on_ladder) {
-        set_grounded(None, colliders, time, ctx, transform);
+        set_grounded(None, colliders, rigid_bodies, time, ctx, transform);
     } else {
         let cast_dir = Dir3::NEG_Y;
         let cast_dist = if ctx.state.platform_velocity.y < 0.0 {
@@ -1213,9 +1242,9 @@ fn update_grounded(
         if let Some(hit) = hit
             && hit.normal1.y >= ctx.cfg.min_walk_cos
         {
-            set_grounded(hit, colliders, time, ctx, transform);
+            set_grounded(hit, colliders, rigid_bodies, time, ctx, transform);
         } else {
-            set_grounded(None, colliders, time, ctx, transform);
+            set_grounded(None, colliders, rigid_bodies, time, ctx, transform);
         }
     }
     // TODO: fire ground changed event
@@ -1258,20 +1287,30 @@ fn cast_move_hands(
 fn set_grounded(
     new_ground: impl Into<Option<MoveHitData>>,
     colliders: &Query<ColliderComponents>,
+    rigid_bodies: &Query<RigidBodyComponents>,
     time: &Time,
     ctx: &mut CtxItem,
     transform: &mut Transform,
 ) {
-    let new_ground = new_ground.into();
+    let mut new_ground = new_ground.into();
     let old_ground = ctx.state.grounded;
 
     if new_ground.is_none()
         && let Some(old_ground) = old_ground
-        && let Ok(platform) = colliders.get(old_ground.entity)
+        && let Ok(platform) = rigid_bodies.get(old_ground.entity)
     {
         calculate_platform_movement(old_ground.point1, &platform, time, ctx, transform);
-    } else if let Some(new_ground) = new_ground
-        && let Ok(platform) = colliders.get(new_ground.entity)
+    } else if let Some(new_ground) = new_ground.as_mut()
+        && let Ok(platform) = {
+            let platform_rigid_body = colliders
+                .get(new_ground.entity)
+                .map(|collider| collider.body.body)
+                .unwrap_or(new_ground.entity);
+            if platform_rigid_body != new_ground.entity {
+                new_ground.entity = platform_rigid_body;
+            }
+            rigid_bodies.get(platform_rigid_body)
+        }
     {
         calculate_platform_movement(new_ground.point1, &platform, time, ctx, transform);
     }
@@ -1288,7 +1327,7 @@ fn set_grounded(
 
 fn calculate_platform_movement(
     ground: Vec3,
-    platform: &ColliderComponentsReadOnlyItem,
+    platform: &RigidBodyComponentsReadOnlyItem,
     time: &Time,
     ctx: &mut CtxItem,
     transform: &mut Transform,
@@ -1451,6 +1490,7 @@ fn handle_jump(
     wish_velocity: Vec3,
     time: &Time,
     colliders: &Query<ColliderComponents>,
+    rigid_bodies: &Query<RigidBodyComponents>,
     move_and_slide: &MoveAndSlide,
     ctx: &mut CtxItem,
     transform: &mut Transform,
@@ -1472,7 +1512,7 @@ fn handle_jump(
             if jump_time.elapsed() > ctx.cfg.jump_input_buffer {
                 return;
             }
-            set_grounded(None, colliders, time, ctx, transform);
+            set_grounded(None, colliders, rigid_bodies, time, ctx, transform);
             // set last_ground to coyote time to make it not jump again after jumping ungrounds us
             ctx.state.last_ground.set_elapsed(ctx.cfg.coyote_time);
             Vec3::Y

@@ -144,6 +144,7 @@ impl Plugin for AhoySchedulePlugin {
 pub enum AhoySystems {
     MoveCharacters,
     ApplyForcesToDynamicRigidBodies,
+    UpdateCameras,
 }
 
 #[derive(Component, Clone, Reflect, PartialEq, Debug)]
@@ -155,7 +156,7 @@ pub enum AhoySystems {
     CharacterControllerState,
     CharacterControllerDerivedProps,
     CharacterControllerOutput,
-    TranslationInterpolation,
+    // TranslationInterpolation,
     RigidBody = RigidBody::Kinematic,
     WaterState,
     CustomPositionIntegration,
@@ -327,6 +328,7 @@ impl CharacterLook {
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
 #[reflect(Component)]
+#[component(map_entities)]
 pub struct CharacterControllerState {
     pub orientation: Quat,
     /// The velocity of the platform that the character is standing on (or has recently jumped off
@@ -364,6 +366,14 @@ impl Default for CharacterControllerState {
             last_step_down: max_stopwatch(),
             crane_height_left: None,
             mantle: None,
+        }
+    }
+}
+
+impl MapEntities for CharacterControllerState {
+    fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
+        if let Some(move_hit_data) = self.grounded.as_mut() {
+            move_hit_data.entity.map_entities(entity_mapper);
         }
     }
 }

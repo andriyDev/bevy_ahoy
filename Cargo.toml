@@ -13,11 +13,20 @@ include = ["/src", "/license*", "/examples"]
 
 [features]
 default = ["pickup"]
-serialize = ["dep:serde", "avian3d/serialize", "bevy_math/serialize", "avian_pickup/serialize"]
+serialize = [
+    "dep:serde",
+    "avian3d/serialize",
+    "bevy_math/serialize",
+    "avian_pickup/serialize",
+]
 pickup = ["dep:avian_pickup"]
 
 [dependencies]
-avian3d = { version = "0.6.0-rc.1", default-features = false, features = ["parry-f32", "3d", "f32"] }
+avian3d = { version = "0.6.0-rc.1", default-features = false, features = [
+    "parry-f32",
+    "3d",
+    "f32",
+] }
 bevy_ecs = { version = "0.18", default-features = false }
 bevy_app = { version = "0.18", default-features = false }
 bevy_derive = { version = "0.18", default-features = false }
@@ -25,14 +34,22 @@ bevy_utils = { version = "0.18", default-features = false }
 bevy_math = { version = "0.18", default-features = false }
 bevy_reflect = { version = "0.18", default-features = false }
 bevy_transform = { version = "0.18", default-features = false }
-bevy_time = { version = "0.18", default-features = false }
+bevy_time = { version = "0.18", default-features = false, features = [
+    "serialize",
+] }
 bevy_enhanced_input = { version = "0.24", default-features = false }
 tracing = { version = "0.1", default-features = false }
 avian_pickup = { version = "0.5.0-rc.1", default-features = false, optional = true }
-serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+serde = { version = "1", default-features = false, features = [
+    "derive",
+], optional = true }
 
 [dev-dependencies]
-bevy = { version = "0.18", features = ["track_location", "dynamic_linking", "file_watcher"] }
+bevy = { version = "0.18", features = [
+    "track_location",
+    "dynamic_linking",
+    "file_watcher",
+] }
 bevy_trenchbroom = { version = "0.12.0", git = "https://github.com/janhohenheim/bevy_trenchbroom", branch = "avian-0.6" }
 bevy_trenchbroom_avian = { version = "0.13.0-rc.1", git = "https://github.com/janhohenheim/bevy_trenchbroom", branch = "avian-0.6" }
 bevy_mod_mipmap_generator = { version = "0.1.0", git = "https://github.com/DGriffin91/bevy_mod_mipmap_generator" }

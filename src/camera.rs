@@ -22,10 +22,22 @@ impl Plugin for AhoyCameraPlugin {
         )
         .add_systems(
             Update,
-            copy_character_look_to_camera.after(spin_character_look),
+            copy_character_look_to_camera
+                .in_set(AhoySystems::UpdateCameras)
+                .after(spin_character_look),
+        )
+        .configure_sets(
+            PostUpdate,
+            AhoySystems::UpdateCameras.before(TransformSystems::Propagate),
+        )
+        .add_systems(
+            PostUpdate,
+            sync_camera_transform.in_set(AhoySystems::UpdateCameras),
         )
         .add_observer(rotate_camera)
-        .add_observer(yank_camera);
+        .add_observer(yank_camera)
+        .add_observer(snap_camera_position_to_kcc_on_add)
+        .add_observer(snap_camera_rotation_to_kcc_on_add);
     }
 }
 
@@ -61,14 +73,48 @@ impl CharacterControllerCameraOf {
         let Some(kcc) = world.get::<Self>(ctx.entity).copied() else {
             return;
         };
-        let Some(kcc_transform) = world.get::<Transform>(kcc.get()).copied() else {
-            return;
-        };
+        let position = world.get::<Position>(kcc.get()).copied();
+        let rotation = world.get::<Rotation>(kcc.get()).copied();
+
         let Some(mut camera_transform) = world.get_mut::<Transform>(ctx.entity) else {
             return;
         };
-        *camera_transform = kcc_transform;
+
+        if let Some(position) = position {
+            camera_transform.translation = position.0;
+        }
+        if let Some(rotation) = rotation {
+            camera_transform.rotation = rotation.0;
+        }
     }
+}
+
+fn snap_camera_position_to_kcc_on_add(
+    event: On<Add, Position>,
+    kcc: Query<(&CharacterControllerCamera, &Position)>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let Ok((camera, position)) = kcc.get(event.entity) else {
+        return;
+    };
+    let Ok(mut transform) = transforms.get_mut(camera.get()) else {
+        return;
+    };
+    transform.translation = position.0;
+}
+
+fn snap_camera_rotation_to_kcc_on_add(
+    event: On<Add, Rotation>,
+    kcc: Query<(&CharacterControllerCamera, &Rotation)>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let Ok((camera, rotation)) = kcc.get(event.entity) else {
+        return;
+    };
+    let Ok(mut transform) = transforms.get_mut(camera.get()) else {
+        return;
+    };
+    transform.rotation = rotation.0;
 }
 
 #[derive(Component, Clone, Copy, Debug)]
